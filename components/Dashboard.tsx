@@ -2,8 +2,8 @@
 
 import { useCallback, useState } from "react";
 import { buildShariaGateState } from "@/lib/compliance";
-import { isSandboxMode } from "@/lib/config";
 import { buildStrategies } from "@/lib/strategies";
+import { useDeployment } from "@/components/providers/DeploymentProvider";
 import { useDashboardSnapshot } from "@/hooks/useDashboardSnapshot";
 import type { DashboardState, ShariaGateState } from "@/lib/types";
 import DashboardShell from "@/components/dashboard/DashboardShell";
@@ -17,44 +17,40 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ initial }: DashboardProps) {
-  const sandbox = isSandboxMode();
+  const { isSandbox } = useDeployment();
   const { data, apiStatus } = useDashboardSnapshot(initial);
   const [sandboxCompliance, setSandboxCompliance] =
     useState<ShariaGateState | null>(null);
 
-  const compliance = sandboxCompliance ?? data.compliance;
-  const strategies =
-    sandboxCompliance !== null
-      ? buildStrategies(data.book.totalEquity, compliance)
-      : data.strategies;
+  const book = isSandbox ? initial.book : data.book;
+  const compliance =
+    sandboxCompliance ?? (isSandbox ? initial.compliance : data.compliance);
+  const strategies = buildStrategies(book.totalEquity, compliance);
 
   const handleShariaToggle = useCallback(
     (treasuryShariaCleared: boolean) => {
-      if (!sandbox) return;
+      if (!isSandbox) return;
       setSandboxCompliance(
-        buildShariaGateState(treasuryShariaCleared, data.book.totalEquity)
+        buildShariaGateState(treasuryShariaCleared, book.totalEquity)
       );
     },
-    [sandbox, data.book.totalEquity]
+    [isSandbox, book.totalEquity]
   );
 
   return (
     <DashboardShell
       apiStatus={apiStatus}
       executiveBriefing={<ExecutiveBriefing />}
-      metricsBar={<MetricsBar metrics={data.book} />}
+      metricsBar={<MetricsBar metrics={book} />}
       compliancePanel={
         <CompliancePanel
           state={compliance}
           onToggle={handleShariaToggle}
-          readOnly={!sandbox}
+          readOnly={!isSandbox}
         />
       }
       strategyAttribution={
-        <StrategyAttribution
-          strategies={strategies}
-          totalEquity={data.book.totalEquity}
-        />
+        <StrategyAttribution strategies={strategies} totalEquity={book.totalEquity} />
       }
     />
   );

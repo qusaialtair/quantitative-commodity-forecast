@@ -1,11 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  isSandboxMode,
-  SNAPSHOT_API_URL,
-  SNAPSHOT_POLL_MS,
-} from "@/lib/config";
+import { useDeployment } from "@/components/providers/DeploymentProvider";
+import { SNAPSHOT_API_URL, SNAPSHOT_POLL_MS } from "@/lib/config";
 import { fetchSnapshot, mapSnapshotToDashboard } from "@/lib/api/snapshot";
 import type { ApiConnectionStatus, DashboardState } from "@/lib/types";
 
@@ -19,14 +16,20 @@ interface UseDashboardSnapshotResult {
 export function useDashboardSnapshot(
   initial: DashboardState
 ): UseDashboardSnapshotResult {
-  const sandbox = isSandboxMode();
+  const { isSandbox } = useDeployment();
   const [data, setData] = useState<DashboardState>(initial);
-  const [apiStatus, setApiStatus] = useState<ApiConnectionStatus>(
-    sandbox ? "DISCONNECTED" : "DISCONNECTED"
-  );
+  const [apiStatus, setApiStatus] = useState<ApiConnectionStatus>("DISCONNECTED");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (isSandbox) {
+      setData(initial);
+      setApiStatus("DISCONNECTED");
+      setError(null);
+    }
+  }, [isSandbox, initial]);
 
   const poll = useCallback(async (signal: AbortSignal) => {
     if (inFlightRef.current) return;
@@ -50,7 +53,7 @@ export function useDashboardSnapshot(
   }, []);
 
   useEffect(() => {
-    if (sandbox) {
+    if (isSandbox) {
       return;
     }
 
@@ -65,7 +68,7 @@ export function useDashboardSnapshot(
       controller.abort();
       window.clearInterval(intervalId);
     };
-  }, [sandbox, poll]);
+  }, [isSandbox, poll]);
 
   return { data, apiStatus, lastUpdatedAt, error };
 }

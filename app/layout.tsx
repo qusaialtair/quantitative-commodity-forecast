@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
+import { DeploymentProvider } from "@/components/providers/DeploymentProvider";
 import "./globals.css";
 
 const inter = Inter({
@@ -14,7 +15,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "Altair MK1",
-  description: "Institutional trading terminal",
+  description: "Institutional quantitative trading terminal — demo deployment",
 };
 
 export default function RootLayout({
@@ -28,7 +29,7 @@ export default function RootLayout({
         className={`${inter.variable} ${jetbrainsMono.variable} min-h-screen bg-ebony font-sans text-text-primary antialiased`}
         suppressHydrationWarning
       >
-        {children}
+        <DeploymentProvider>{children}</DeploymentProvider>
       </body>
     </html>
   );

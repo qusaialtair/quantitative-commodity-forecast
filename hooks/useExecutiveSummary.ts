@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { isSandboxMode, SNAPSHOT_API_URL } from "@/lib/config";
+import { useDeployment } from "@/components/providers/DeploymentProvider";
+import { SNAPSHOT_API_URL } from "@/lib/config";
 import {
   fetchExecutiveSummary,
   type ExecutiveSummaryPayload,
@@ -17,15 +18,15 @@ interface UseExecutiveSummaryResult {
 }
 
 export function useExecutiveSummary(): UseExecutiveSummaryResult {
-  const sandbox = isSandboxMode();
+  const { isSandbox } = useDeployment();
   const [payload, setPayload] = useState<ExecutiveSummaryPayload | null>(
-    sandbox ? MOCK_EXECUTIVE_SUMMARY : null
+    isSandbox ? MOCK_EXECUTIVE_SUMMARY : null
   );
-  const [isLoading, setIsLoading] = useState(!sandbox);
+  const [isLoading, setIsLoading] = useState(!isSandbox);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (sandbox) {
+    if (isSandbox) {
       setPayload(MOCK_EXECUTIVE_SUMMARY);
       setIsLoading(false);
       setError(null);
@@ -58,13 +59,13 @@ export function useExecutiveSummary(): UseExecutiveSummaryResult {
 
     void load();
     return () => controller.abort();
-  }, [sandbox]);
+  }, [isSandbox]);
 
   return {
     summary: payload?.summary ?? "",
     generatedAt: payload?.generated_at ?? null,
     isLoading,
     error,
-    isSandbox: sandbox,
+    isSandbox,
   };
 }
