@@ -17,6 +17,7 @@ Endpoints:
     GET  /api/metals                       price + regime + committee
     GET  /api/equities                     virtual equity account + ranker
     GET  /api/briefing                     executive briefing
+    GET  /api/executive-summary            live CRO dumb-mode summary (DeepSeek)
     POST /api/regen-briefing               re-run executive_briefer.py
     POST /api/run-pipeline                 trigger master_controller (background)
     WS   /ws                               live updates (push on file change)
@@ -36,7 +37,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -137,35 +138,121 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _build_dashboard_snapshot() -> dict:
-    """Aggregate book metrics + Phase XXV sleeve for the Next.js terminal."""
-    book = _load_json("multi_strategy_trader.json") or {}
-    hedge = _load_json("treasury_hedge.json") or {}
-    basket = _load_json("trade_basket.json") or {}
+HALT_FLAG_FILE = DATA_DIR / "trading_halted.flag"
+OVERRIDE_FILE = DATA_DIR / "operator_override.json"
 
-    total_equity = float(
-        book.get("book_equity_usd")
+
+def _mock_phase14_book() -> dict:
+    """Secure Phase XXV fallback when phase14_book.json is absent or unreadable."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return {
+        "schema_version": "1.0",
+        "starting_capital": 100_000.0,
+        "cash_usd": 100_000.0,
+        "open_trades": [],
+        "closed_trades": [],
+        "last_strategy": "CASH",
+        "last_run": now,
+        "n_runs": 0,
+        "hedge_state": {
+            "instrument": "GLD",
+            "allocation_pct": 0.0,
+            "quadrant": "UNKNOWN",
+            "tier": "NORMAL",
+            "sub_tag": "sharia_fallback_gld",
+            "mode": "SIGNAL_ONLY",
+            "updated_at": now,
+        },
+        "_mock": True,
+    }
+
+
+def load_latest_trading_data() -> dict:
+    """Fresh read of phase14_book.json plus trader/hedge context for API broadcast."""
+    book_path = DATA_DIR / "phase14_book.json"
+    book: dict | None = None
+    if book_path.exists():
+        try:
+            raw = json.loads(book_path.read_text())
+            if isinstance(raw, dict):
+                book = raw
+        except Exception:
+            book = None
+
+    source = "live"
+    if not book:
+        book = _mock_phase14_book()
+        source = "mock"
+
+    trader = _load_json("multi_strategy_trader.json") or {}
+    hedge = _load_json("treasury_hedge.json") or {}
+    override = _load_json("operator_override.json")
+
+    open_trades = book.get("open_trades") or []
+    gross_open = sum(float(t.get("notional_usd") or 0) for t in open_trades)
+    equity = float(
+        trader.get("book_equity_usd")
+        or book.get("cash_usd")
         or book.get("starting_capital")
         or 100_000.0
     )
-    open_pl = float(book.get("open_pl_usd") or 0.0)
+    open_pl = float(trader.get("open_pl_usd") or 0.0)
+    hedge_state = book.get("hedge_state") or trader.get("hedge_state") or {}
+
+    return {
+        "source": source,
+        "phase14_book": book,
+        "trader": trader,
+        "treasury_hedge": hedge,
+        "trading_halted": HALT_FLAG_FILE.exists(),
+        "operator_override": override,
+        "metrics": {
+            "book_equity_usd": round(equity, 2),
+            "cash_usd": round(float(book.get("cash_usd") or trader.get("cash_usd") or equity), 2),
+            "open_pl_usd": round(open_pl, 2),
+            "open_trades_count": len(open_trades),
+            "open_gross_notional_usd": round(gross_open, 2),
+            "last_strategy": book.get("last_strategy") or trader.get("strategy"),
+            "last_run": book.get("last_run") or trader.get("generated_at"),
+            "hedge_state": hedge_state,
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def _build_dashboard_snapshot() -> dict:
+    """Aggregate book metrics + Phase XXV sleeve for the Next.js terminal."""
+    trading = load_latest_trading_data()
+    book = trading.get("trader") or {}
+    p14 = trading.get("phase14_book") or {}
+    metrics = trading.get("metrics") or {}
+    hedge = trading.get("treasury_hedge") or _load_json("treasury_hedge.json") or {}
+    basket = _load_json("trade_basket.json") or {}
+
+    total_equity = float(metrics.get("book_equity_usd") or 100_000.0)
+    open_pl = float(metrics.get("open_pl_usd") or 0.0)
     daily_pnl_pct = (open_pl / total_equity * 100.0) if total_equity else 0.0
 
-    gross_exposure = float(
-        basket.get("gross_exposure_target_pct")
-        or (float(basket.get("long_alloc_pct") or 0.0)
-            + float(basket.get("short_alloc_pct") or 0.0))
-        or 96.0
+    open_notional = float(metrics.get("open_gross_notional_usd") or 0.0)
+    gross_exposure = (
+        (open_notional / total_equity * 100.0) if total_equity and open_notional else float(
+            basket.get("gross_exposure_target_pct")
+            or (float(basket.get("long_alloc_pct") or 0.0)
+                + float(basket.get("short_alloc_pct") or 0.0))
+            or 0.0
+        )
     )
 
     sharia_cleared = _env_bool("TREASURY_SHARIA_CLEARED", False)
     if hedge.get("sharia_cleared") is not None:
         sharia_cleared = bool(hedge.get("sharia_cleared"))
 
+    hedge_state = metrics.get("hedge_state") or {}
     defensive_pct = float(
-        hedge.get("max_allocation_pct")
+        hedge_state.get("allocation_pct")
         or hedge.get("effective_allocation_pct")
-        or 20.0
+        or hedge.get("max_allocation_pct")
+        or 0.0
     )
     alpha_pct = max(0.0, 100.0 - defensive_pct)
 
@@ -182,15 +269,10 @@ def _build_dashboard_snapshot() -> dict:
             hedge_pl += pl
         else:
             alpha_pl += pl
-    if not by_book:
-        alpha_pl = float(book.get("open_pl_usd") or 0.0) or 1_208.0
-        hedge_pl = 32.0
-    elif alpha_pl == 0.0 and hedge_pl == 0.0:
-        alpha_pl = float(book.get("open_pl_usd") or 0.0) or 1_208.0
-        hedge_pl = 32.0
 
     effective_inst = (
-        hedge.get("effective_instrument")
+        hedge_state.get("instrument")
+        or hedge.get("effective_instrument")
         or ("TLT" if sharia_cleared else "GLD")
     )
     defensive_instruments = (
@@ -203,6 +285,9 @@ def _build_dashboard_snapshot() -> dict:
         "daily_pnl": round(daily_pnl_pct, 2),
         "daily_pnl_usd": round(open_pl, 2),
         "treasury_sharia_cleared": sharia_cleared,
+        "trading_halted": trading.get("trading_halted", False),
+        "data_source": trading.get("source", "live"),
+        "last_strategy": metrics.get("last_strategy") or p14.get("last_strategy"),
         "by_strategy": {
             "alpha_core": {
                 "name": "Alpha Core Strategies",
@@ -236,6 +321,7 @@ def _build_dashboard_snapshot() -> dict:
 def dashboard_snapshot(response: Response) -> dict:
     """Live dashboard packet for the Altair MK1 Next.js terminal."""
     payload = _build_dashboard_snapshot()
+    payload["trading"] = load_latest_trading_data()
     response.headers["Cache-Control"] = "no-store"
     return payload
 
@@ -644,11 +730,12 @@ async def run_backtest_endpoint(lookback: int = 504, target: float = 10.0) -> di
 
 @app.get("/api/phase14/trades")
 def phase14_trades(status: str = "all") -> dict:
-    book = _load_json("phase14_book.json") or {}
+    trading = load_latest_trading_data()
+    book = trading.get("phase14_book") or {}
     if status == "open":
-        return {"trades": book.get("open_trades", [])}
+        return {"trades": book.get("open_trades", []), "source": trading.get("source")}
     if status == "closed":
-        return {"trades": book.get("closed_trades", [])}
+        return {"trades": book.get("closed_trades", []), "source": trading.get("source")}
     return {
         "open": book.get("open_trades", []),
         "closed": book.get("closed_trades", []),
@@ -657,6 +744,8 @@ def phase14_trades(status: str = "all") -> dict:
         "last_strategy": book.get("last_strategy"),
         "last_run": book.get("last_run"),
         "n_runs": book.get("n_runs", 0),
+        "source": trading.get("source"),
+        "trading_halted": trading.get("trading_halted", False),
     }
 
 
@@ -695,6 +784,24 @@ def briefing() -> dict:
     return _load_json("executive_briefing.json") or {}
 
 
+@app.get("/api/executive-summary")
+def executive_summary(response: Response) -> dict:
+    """Live CRO 'Dumb Mode' summary — reads phase14_book.json, calls DeepSeek."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        from scripts.deepseek_explainer import executive_summary_dumb_mode
+        result = executive_summary_dumb_mode()
+        return {"summary": result.get("summary") or ""}
+    except Exception as exc:
+        return {
+            "summary": (
+                "Executive summary temporarily offline. "
+                "Review the Phase XIV book and Treasury hedge panels for live exposure. "
+                f"({type(exc).__name__})"
+            ),
+        }
+
+
 # ─── Phase XXIV: Execution Monitor endpoints ──────────────────────────────────
 
 @app.get("/api/execution-mode")
@@ -703,12 +810,11 @@ def execution_mode_endpoint() -> dict:
     mode = (os.environ.get("EXECUTION_MODE") or "paper_internal").lower()
     if mode not in {"paper_internal", "paper_ibkr", "live_ibkr"}:
         mode = "paper_internal"
-    halt_flag = DATA_DIR / "trading_halted.flag"
     today = datetime.now(timezone.utc).date().isoformat()
     live_confirm = os.environ.get("LIVE_TRADING_CONFIRM") == f"YES_{today}"
     return {
         "mode": mode,
-        "halted": halt_flag.exists(),
+        "halted": HALT_FLAG_FILE.exists(),
         "live_confirm_valid": live_confirm,
         "today_utc": today,
         "ibkr_host": os.environ.get("IBKR_HOST", "127.0.0.1"),
@@ -778,14 +884,85 @@ class HaltRequest(BaseModel):
     halted: bool
 
 
+class OverrideRequest(BaseModel):
+    action: Literal["AUTHORIZE", "HALT"]
+
+
+@app.post("/api/override")
+async def portfolio_override(req: OverrideRequest) -> dict:
+    """Portfolio Manager control loop — HALT suspends routing; AUTHORIZE clears it."""
+    action = req.action.upper()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    pipeline_status: str | None = None
+
+    if action == "HALT":
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        HALT_FLAG_FILE.write_text(json.dumps({
+            "halted_at": now,
+            "source": "EXECUTIVE_OVERRIDE",
+            "action": "HALT",
+            "liquidate_to_cash": True,
+        }))
+        message = "Emergency halt engaged — liquidate-to-cash routing armed"
+    else:
+        try:
+            HALT_FLAG_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        override_record = {
+            "action": "AUTHORIZE",
+            "authorized_at": now,
+            "cleared_for_date": today,
+            "source": "EXECUTIVE_OVERRIDE",
+            "message": f"Execution cleared for {today}",
+        }
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        OVERRIDE_FILE.write_text(json.dumps(override_record, indent=2))
+        message = "Pipeline authorization accepted"
+
+        pipeline_status = "ALREADY_RUNNING" if _pipeline_lock.locked() else "STARTED"
+        if pipeline_status == "STARTED":
+            async def _runner():
+                async with _pipeline_lock:
+                    proc = await asyncio.create_subprocess_exec(
+                        "python3", str(SCRIPTS_DIR / "master_controller.py"),
+                        cwd=str(ROOT),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await proc.wait()
+
+            asyncio.create_task(_runner())
+
+    trading = load_latest_trading_data()
+    await manager.broadcast({
+        "type": "override_updated",
+        "action": action,
+        "at": now,
+        "trading_halted": HALT_FLAG_FILE.exists(),
+        "trading": trading,
+    })
+
+    return {
+        "status": "OK",
+        "action": action,
+        "message": message,
+        "halted": HALT_FLAG_FILE.exists(),
+        "trading_halted": HALT_FLAG_FILE.exists(),
+        "cleared_for_date": today if action == "AUTHORIZE" else None,
+        "pipeline": pipeline_status,
+    }
+
+
 @app.post("/api/halt-trading")
 def halt_trading_endpoint(req: HaltRequest) -> dict:
     """Toggle the durable kill-switch. Writing creates data/trading_halted.flag;
     every order_router.route_order returns HALTED while the flag exists."""
-    halt_file = DATA_DIR / "trading_halted.flag"
     if req.halted:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        halt_file.write_text(
+        HALT_FLAG_FILE.write_text(
             json.dumps({
                 "halted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source": "UI",
@@ -793,10 +970,10 @@ def halt_trading_endpoint(req: HaltRequest) -> dict:
         )
     else:
         try:
-            halt_file.unlink()
+            HALT_FLAG_FILE.unlink()
         except FileNotFoundError:
             pass
-    return {"status": "OK", "halted": halt_file.exists()}
+    return {"status": "OK", "halted": HALT_FLAG_FILE.exists()}
 
 
 @app.post("/api/run-reconciler")
@@ -979,20 +1156,40 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 @app.on_event("startup")
 async def start_file_watcher() -> None:
-    """Poll pipeline_state.json's mtime; broadcast a 'state_updated' message on change."""
+    """Poll engine JSON mtimes; broadcast live trading + pipeline updates."""
+    watch_files = (
+        "pipeline_state.json",
+        "phase14_book.json",
+        "multi_strategy_trader.json",
+    )
+
     async def watcher():
-        last_mtime = 0.0
+        last_mtimes: dict[str, float] = {}
         while True:
             try:
-                p = DATA_DIR / "pipeline_state.json"
-                if p.exists():
+                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                for fname in watch_files:
+                    p = DATA_DIR / fname
+                    if not p.exists():
+                        continue
                     m = p.stat().st_mtime
-                    if m != last_mtime:
-                        last_mtime = m
+                    if last_mtimes.get(fname) == m:
+                        continue
+                    last_mtimes[fname] = m
+                    if fname == "pipeline_state.json":
                         await manager.broadcast({
                             "type": "state_updated",
-                            "at":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "file": fname,
+                            "at": now,
                             "mtime": m,
+                        })
+                    else:
+                        await manager.broadcast({
+                            "type": "trading_updated",
+                            "file": fname,
+                            "at": now,
+                            "mtime": m,
+                            "trading": load_latest_trading_data(),
                         })
             except Exception:
                 pass

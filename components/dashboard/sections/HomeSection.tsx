@@ -14,10 +14,7 @@ export default function HomeSection({
       {compliancePanel}
       {strategyAttribution}
 
-      <div className="grid gap-px bg-border lg:grid-cols-2">
-        <ModuleCard title="EXECUTIVE BRIEFING" subtitle="Chief of Staff" className="min-h-[180px]" />
-        <ModuleCard title="PERFORMANCE HERO" subtitle="Phase XIV target" className="min-h-[180px]" />
-      </div>
+      <ModuleCard title="PERFORMANCE HERO" subtitle="Phase XIV target" className="min-h-[180px]" />
 
       <ModuleCard title="HOLDINGS" subtitle="Live prices / P&L" className="min-h-[280px]" />
 

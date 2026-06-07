@@ -10,6 +10,7 @@ import DashboardShell from "@/components/dashboard/DashboardShell";
 import MetricsBar from "@/components/MetricsBar";
 import CompliancePanel from "@/components/CompliancePanel";
 import StrategyAttribution from "@/components/StrategyAttribution";
+import ExecutiveBriefing from "@/components/ExecutiveBriefing";
 
 interface DashboardProps {
   initial: DashboardState;
@@ -40,6 +41,7 @@ export default function Dashboard({ initial }: DashboardProps) {
   return (
     <DashboardShell
       apiStatus={apiStatus}
+      executiveBriefing={<ExecutiveBriefing />}
       metricsBar={<MetricsBar metrics={data.book} />}
       compliancePanel={
         <CompliancePanel

@@ -20,6 +20,7 @@ const SECTIONS: Record<NavSection, React.ComponentType> = {
 
 interface DashboardShellProps {
   apiStatus: ApiConnectionStatus;
+  executiveBriefing: React.ReactNode;
   metricsBar: React.ReactNode;
   compliancePanel: React.ReactNode;
   strategyAttribution: React.ReactNode;
@@ -27,6 +28,7 @@ interface DashboardShellProps {
 
 export default function DashboardShell({
   apiStatus,
+  executiveBriefing,
   metricsBar,
   compliancePanel,
   strategyAttribution,
@@ -38,6 +40,9 @@ export default function DashboardShell({
     <div className="flex min-h-screen flex-col bg-ebony">
       <Header apiStatus={apiStatus} />
       <NavTabs active={active} onChange={setActive} />
+      {active === "home" && (
+        <div className="border-b border-border">{executiveBriefing}</div>
+      )}
       <div className="border-b border-border">{metricsBar}</div>
       <main className="flex-1 overflow-auto p-px">
         {active === "home" ? (
