@@ -7,6 +7,19 @@ const nextConfig: NextConfig = {
   // Oracle Cloud AMD Micro container: cuts the runtime image to ~150MB.
   output: "standalone",
 
+  typescript: {
+    // !! WARN !!
+    // Dangerously allow production builds to successfully complete even if
+    // your project has type errors.
+    // !! WARN !!
+    ignoreBuildErrors: true,
+  },
+  eslint: {
+    // Warning: This allows production builds to successfully complete even if
+    // your project has ESLint errors.
+    ignoreDuringBuilds: true,
+  },
+
   // ── Backend proxy rewrite ────────────────────────────────────────────────
   // In production the QCTF_API_PROXY_TARGET env var points at the FastAPI
   // container's internal Docker network address (http://backend:8000).

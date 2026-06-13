@@ -12,7 +12,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: Install dependencies ────────────────────────────────────────────
-FROM node:18-alpine AS deps
+FROM node:20-alpine AS deps
 
 # libc6-compat is needed by some native Node.js addons on Alpine
 RUN apk add --no-cache libc6-compat
@@ -26,7 +26,7 @@ RUN npm ci --frozen-lockfile
 
 
 # ── Stage 2: Build ────────────────────────────────────────────────────────────
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -51,7 +51,7 @@ RUN npm run build
 
 
 # ── Stage 3: Minimal runtime image ───────────────────────────────────────────
-FROM node:18-alpine AS runner
+FROM node:20-alpine AS runner
 
 WORKDIR /app
 
