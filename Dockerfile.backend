@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Dockerfile — FastAPI Backend (QCTF API Bridge)
+#  Base: python:3.11-slim (Debian Bookworm)
+#  Target: Oracle Linux 9 AMD Micro (1 vCPU, 1 GB RAM)
+#  Memory budget: 350 MB (enforced by docker-compose mem_limit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.11-slim AS base
+
+# ── System hardening ─────────────────────────────────────────────────────────
+# Non-root user for security; install only what uvicorn needs at runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged runtime user
+RUN groupadd --gid 1001 qctf && \
+    useradd  --uid 1001 --gid qctf --shell /bin/sh --create-home qctf
+
+# ── Python dependencies ──────────────────────────────────────────────────────
+WORKDIR /app
+
+COPY requirements-api.txt .
+
+# --no-cache-dir cuts ~50 MB off the image
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements-api.txt
+
+# ── Application code ─────────────────────────────────────────────────────────
+# Copy only what the API bridge needs — exclude heavy ML scripts
+COPY api/         ./api/
+COPY scripts/     ./scripts/
+COPY agents/      ./agents/
+COPY execution/   ./execution/
+COPY data_pipelines/ ./data_pipelines/
+COPY lib/         ./lib/
+
+# Data directory: pipeline state JSON files are mounted as a volume
+RUN mkdir -p /app/data && chown -R qctf:qctf /app
+
+# ── Runtime ──────────────────────────────────────────────────────────────────
+USER qctf
+
+EXPOSE 8000
+
+# Single worker to stay inside the 350MB limit.
+# --no-access-log suppresses per-request noise (use structured Python logging).
+CMD ["uvicorn", "api.server:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1", \
+     "--no-access-log"]

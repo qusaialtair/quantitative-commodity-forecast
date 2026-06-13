@@ -32,10 +32,38 @@ export interface StrategyAllocation {
   color: string;
 }
 
-export type ApiConnectionStatus = "CONNECTED" | "DISCONNECTED";
+export type ApiConnectionStatus =
+  | "CONNECTED"
+  | "DISCONNECTED"
+  | "LOCAL_SIMULATION";
+
+export type PositionType = "LONG" | "SHORT" | "FLAT";
+
+export interface HoldingRow {
+  ticker: string;
+  assetName: string;
+  positionType: PositionType;
+  allocationPct: number;
+  notionalUsd: number;
+  livePnlUsd: number;
+  livePnlPct: number;
+  strategyId?: string;
+}
+
+export interface SessionPerformanceHero {
+  strategyId: string;
+  strategyName: string;
+  winRatePct: number;
+  pnlContributionUsd: number;
+  pnlContributionPct: number;
+  sessionLabel?: string;
+  accentColor?: string;
+}
 
 export interface DashboardState {
   book: BookMetrics;
   compliance: ShariaGateState;
   strategies: StrategyAllocation[];
+  holdings: HoldingRow[];
+  performanceHero: SessionPerformanceHero;
 }

@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -95,7 +96,11 @@ _STATS: dict = _load_stats()
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _ns_dir(namespace: str) -> Path:
-    p = CACHE_DIR / namespace
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", namespace):
+        raise ValueError(f"invalid cache namespace: {namespace!r}")
+    p = (CACHE_DIR / namespace).resolve()
+    if not p.is_relative_to(CACHE_DIR.resolve()):
+        raise ValueError(f"invalid cache namespace: {namespace!r}")
     p.mkdir(parents=True, exist_ok=True)
     return p
 

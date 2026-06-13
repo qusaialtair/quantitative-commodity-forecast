@@ -11,16 +11,28 @@ interface HeaderProps {
   apiStatus: ApiConnectionStatus;
 }
 
+function badgeCopy(status: ApiConnectionStatus): string {
+  switch (status) {
+    case "CONNECTED":
+      return "BACKEND API: CONNECTED";
+    case "LOCAL_SIMULATION":
+      return "LOCAL SIMULATION";
+    default:
+      return "BACKEND API: DISCONNECTED";
+  }
+}
+
 export default function Header({ apiStatus }: HeaderProps) {
   const time = useClock();
   const { isHostedProduction } = useDeployment();
   const connected = apiStatus === "CONNECTED";
+  const simulating = apiStatus === "LOCAL_SIMULATION";
 
   return (
     <header className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-3">
         <span className="font-mono text-[11px] font-semibold tracking-[0.2em] text-text-primary">
-          ALTAIR MK1
+          QCTF MODEL
         </span>
         <span className="hidden text-border-strong sm:inline">//</span>
         <span className="hidden font-mono text-[10px] tracking-[0.14em] text-text-muted sm:inline">
@@ -51,24 +63,32 @@ export default function Header({ apiStatus }: HeaderProps) {
               "flex items-center gap-2 border px-2.5 py-1",
               connected
                 ? "border-positive/30 bg-positive/5"
-                : "border-negative/30 bg-negative/5"
+                : simulating
+                  ? "border-warning/30 bg-warning/5"
+                  : "border-negative/30 bg-negative/5"
             )}
           >
             <Circle
               className={cn(
                 "h-2 w-2",
                 connected
-                  ? "fill-positive text-positive"
-                  : "fill-negative text-negative"
+                  ? "animate-pulse fill-positive text-positive"
+                  : simulating
+                    ? "fill-warning text-warning"
+                    : "fill-negative text-negative"
               )}
             />
             <span
               className={cn(
-                "font-mono text-[9px] font-medium tracking-[0.12em]",
-                connected ? "text-positive" : "text-negative"
+                "font-mono text-[9px] font-medium tracking-[0.12em] uppercase",
+                connected
+                  ? "text-positive"
+                  : simulating
+                    ? "text-warning"
+                    : "text-negative"
               )}
             >
-              BACKEND API: {connected ? "CONNECTED" : "DISCONNECTED"}
+              {badgeCopy(apiStatus)}
             </span>
           </div>
         )}

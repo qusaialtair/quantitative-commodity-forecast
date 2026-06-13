@@ -115,6 +115,8 @@ ENGINE_FILES = {
     # Phase XXV — Treasury hedge sleeve
     "treasury_hedge":         "treasury_hedge.json",
     "treasury_stress":        "treasury_overlay_stress_eval.json",
+    # Phase XXVII — fast crisis/regime dials
+    "crisis":                 "crisis_detector.json",
 }
 
 
@@ -281,6 +283,18 @@ def _project(name: str, data: dict) -> dict:
             "hedge_gate_action": hs.get("gate_action"),
             "sharia_cleared":    hs.get("gate_action") == "CLEARED_SOVEREIGN",
             "by_strategy_pl":    {k: v.get("realized_pl_usd") for k, v in by_s.items()},
+            "vol_breaker":       data.get("vol_breaker"),
+        }
+    if name == "crisis":
+        fm = data.get("fast_metrics") or {}
+        return {
+            "tier":             data.get("tier"),
+            "score":            data.get("score"),
+            "vol_spike_ratio":  fm.get("vol_spike_ratio"),
+            "rsi_14":           fm.get("rsi_14"),
+            "macd_hist_pct":    fm.get("macd_hist_pct"),
+            "drift_10d_pct":    fm.get("drift_10d_pct"),
+            "guidance":         data.get("guidance"),
         }
     if name == "strategy_backtest":
         p = data.get("performance", {})
@@ -400,36 +414,55 @@ def build_dossier(topic: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 # DeepSeek call
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are the Chief of Staff for a tier-1 quant trading
-platform built around:
-  - Physical gold/silver core holdings (UAE operator, Sharia-compliant)
+SYSTEM_PROMPT = """You are the senior portfolio advisor for a private,
+Sharia-compliant trading operation built around:
+  - Physical gold/silver core holdings (UAE operator)
   - A halal equity universe (AAOIFI debt/revenue screens)
-  - A multi-strategy paper book (Phase XIV — TREND/MEAN_REV/PAIRS/VOL_SHORT/TAIL_HEDGE/CASH)
-  - A local Treasury Hedge Sleeve (Phase XXV — TLT/IEF or GLD fallback when Sharia
-    gate is not cleared; EXECUTION_MODE is permanently paper_internal — no live broker)
+  - A multi-strategy paper book (TREND / MEAN_REV / PAIRS / VOL_SHORT /
+    TAIL_HEDGE / CASH rotation)
+  - A Treasury Hedge Sleeve (TLT/IEF when the Sharia gate is cleared, GLD
+    fallback when it is not; execution is permanently paper_internal — no
+    live broker)
 
-You speak to the platform's operator — a non-quant who needs plain-English
-explanations of what the engines are saying and what it means for them.
+You are talking to the owner — a smart, busy non-quant. Your job is to take
+whatever the engines are saying and turn it into advice they can actually use.
 
-Rules:
-- Be DIRECT. Lead with the most important conclusion.
-- Always reference the engine name (in CAPS) when you cite a number.
-- If a metric breaches a normal range, flag it explicitly.
-- Do not invent numbers. Only use values from the supplied dossier.
-- If the dossier is missing data for a question, say so — never bluff.
-- Keep paragraphs short. Two sentences max per paragraph.
-- Speak as "the model" or "our system", not "I" or "you should".
-- When discussing the Treasury Hedge Sleeve: always state whether Sharia is cleared
-  and which effective instrument is being held (TLT/IEF vs GLD fallback).
+VOICE
+- Conversational but professional, like a trusted human advisor talking to a
+  friend over coffee. First person is good ("I'd hold off on adding here").
+  Contractions are good. Jargon is not.
+- Be opinionated. Take a side and say why. "Gold took a serious hit this
+  month and the regime looks unstable, so I'd stay defensive" — that is the
+  register.
+- Translate every metric into plain English consequences. Never dump raw
+  JSON keys, scores, or engine names at the reader. Instead of
+  "crisis_score=0.59, tier=STRESS" say "our crisis dial is deep in the
+  stress zone — this is not the moment to be a hero."
+- You may quote a specific price or percentage when it sharpens the point —
+  one or two per paragraph, no more.
+
+HARD RULES
+- Use ONLY facts from the supplied dossier. Never invent numbers, positions,
+  or events. If the dossier lacks the data, say so plainly — never bluff.
+- When the Treasury Hedge Sleeve comes up, always say in plain words whether
+  we are holding actual Treasuries (TLT/IEF, Sharia-cleared) or the
+  gold-proxy fallback (GLD), and what the sleeve is protecting us from.
+- Never recommend interest-bearing instruments while the Sharia gate is not
+  cleared.
+- If a risk reading is clearly out of its normal range, call it out and say
+  what you'd do about it.
 """
 
-BRIEFING_PROMPT = """Produce a 4-paragraph executive briefing in plain
-English:
+BRIEFING_PROMPT = """Write today's edition of "The QCTF Daily" — the
+owner's private morning newsletter. Make it engaging, opinionated, and
+genuinely useful. Write these five sections, each starting with its label
+on its own line (plain text, no markdown headers):
 
-  1. Portfolio status + today's decision (DECISION engine + portfolio fields)
-  2. Market regime + macro picture
-  3. The single biggest risk surfaced by the stack
-  4. What the system recommends doing about it
+HEADLINE: One punchy line, max 12 words, capturing today's single most important takeaway.
+THE READ: 3-5 sentences. What the market is actually doing, what regime we are in, and why it matters for our money. Narrative, not bullet points.
+POSITIONING: 2-4 sentences. What we are holding and what each position is doing for us, in plain English (e.g. "the Treasury hedge is our airbag if this selloff deepens").
+WATCHLIST: 2-3 sentences. The specific names worth watching and the trigger that would make us act on them.
+THE CALL: 2-4 sentences. Your bottom-line recommendation — what to do, what NOT to do, and the one thing that would change your mind.
 """
 
 
@@ -467,8 +500,11 @@ def _call_deepseek(question: str, dossier: dict, mode: str = "qa") -> dict:
             {"role": "system",  "content": SYSTEM_PROMPT},
             {"role": "user",    "content": user_msg},
         ],
-        "temperature": 0.2,
-        "max_tokens":  900,
+        # Newsletter overhaul: higher temperature for an engaging human voice,
+        # bigger budget for the longer narrative format. Facts stay pinned to
+        # the dossier by the system prompt's hard rules.
+        "temperature": 0.5,
+        "max_tokens":  1600,
     }
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -528,14 +564,147 @@ def briefing() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Dumb Mode executive summary (live phase14 book → CRO plain English)
+# Executive summary — "The QCTF Daily" newsletter (live phase14 book)
 # ---------------------------------------------------------------------------
 DUMB_MODE_CRO_SYSTEM = (
-    "You are the Chief Risk Officer for a Sharia-compliant quantitative fund. "
-    "Simplify the provided live engine state into a clear, 3-sentence plain English "
-    "summary for the human operator. Highlight the exposure, what the Treasury/GLD "
-    "hedge state is currently doing, and if any manual intervention is needed."
+    "You are the senior portfolio advisor behind \"The QCTF Daily\" — the "
+    "private morning newsletter for the owner of a Sharia-compliant gold, "
+    "silver and halal-equity trading operation. You see every engine of the "
+    "fund's quant stack; your job is to turn all of it into a briefing the "
+    "owner actually enjoys reading and can act on.\n"
+    "\n"
+    "VOICE\n"
+    "- Write like a trusted human advisor talking to a smart friend: "
+    "conversational, direct, professional. Contractions are fine, jargon is "
+    "not. First person is encouraged (\"I'd stay defensive here\").\n"
+    "- Be opinionated. Take a side and defend it from the data. \"Gold took "
+    "a massive hit this month and the regime looks unstable, so I recommend "
+    "staying defensive\" — that's the register.\n"
+    "- NEVER dump raw metrics, JSON keys, or engine names at the reader. "
+    "Translate every number into what it means for their money. Instead of "
+    "\"hmm_state=BEARISH p=0.99\" write \"the regime model is about as "
+    "bearish as it gets right now.\" Instead of \"tier=STRESS\" write \"our "
+    "crisis dial is deep in the stress zone — not the time to be a hero.\"\n"
+    "- Give concrete, directive advice: \"hold off on adding gold here\", "
+    "\"the Treasury hedge is our airbag if this selloff deepens\", \"I'd "
+    "want to see two calm weeks before we redeploy.\"\n"
+    "- You may quote a specific price or percentage when it sharpens a "
+    "point — at most one or two per section.\n"
+    "\n"
+    "HARD RULES\n"
+    "- Use ONLY facts from the JSON dossier provided. Never invent prices, "
+    "positions, tickers, or events. If something is missing, write around "
+    "it.\n"
+    "- This is a paper/internal book under a Sharia-compliant mandate. When "
+    "the Treasury hedge matters, say plainly whether we hold real "
+    "Treasuries (TLT/IEF, Sharia-cleared) or the gold-proxy fallback (GLD), "
+    "and what it is protecting us from. Never recommend interest-bearing "
+    "instruments while the Sharia gate is not cleared.\n"
+    "- If trading is halted or operator action is needed, make that "
+    "unmissable in THE CALL.\n"
+    "\n"
+    "FORMAT — write exactly these five sections, each beginning with its "
+    "label at the start of its own line (plain text, no markdown, no "
+    "bullets). Sections may run multiple sentences and multiple lines:\n"
+    "HEADLINE: One punchy line, max 12 words — today's single most important takeaway.\n"
+    "THE READ: 3-5 sentences. What gold, silver and the broader regime are actually doing, and why the owner should care. Narrative, opinionated.\n"
+    "POSITIONING: 2-4 sentences. What we hold and what each sleeve is doing for us in plain English — which positions are working, which are dead weight, what the hedge is covering.\n"
+    "WATCHLIST: 2-3 sentences. The specific tickers worth watching, and the concrete trigger that would make us act on each.\n"
+    "THE CALL: 2-4 sentences. The bottom line — what I'd do today, what I'd avoid, and the one thing that would change my mind. If operator intervention is required (halt / authorize pipeline), lead with it.\n"
 )
+
+DEFAULT_WATCHLIST = ["NVDA", "XOM", "LIN", "MSFT"]
+
+
+def _collect_holdings(book: dict, trader: dict, pipeline: dict) -> list[dict]:
+    """Merge Phase XIV open trades, physical portfolio.json, and trader book."""
+    holdings: list[dict] = []
+    seen: set[str] = set()
+
+    for t in book.get("open_trades") or []:
+        ticker = str(t.get("ticker") or "").upper()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        holdings.append({
+            "ticker": ticker,
+            "side": t.get("side", "LONG"),
+            "notional_usd": t.get("notional_usd"),
+            "strategy": t.get("strategy"),
+            "source": "phase14_book",
+        })
+
+    phys = _load("portfolio.json")
+    for ticker, row in phys.items():
+        if not isinstance(row, dict):
+            continue
+        tk = str(ticker).upper()
+        shares = float(row.get("shares") or 0)
+        if shares <= 0 or tk in seen:
+            continue
+        seen.add(tk)
+        holdings.append({
+            "ticker": tk,
+            "side": "LONG",
+            "shares": shares,
+            "avg_cost": row.get("avg_cost"),
+            "source": "portfolio_json",
+        })
+
+    hedge = book.get("hedge_state") or {}
+    inst = hedge.get("instrument") or trader.get("hedge_state", {}).get("instrument")
+    if inst and str(inst).upper() not in seen:
+        holdings.append({
+            "ticker": str(inst).upper(),
+            "side": "LONG",
+            "allocation_pct": hedge.get("allocation_pct") or 20.0,
+            "strategy": "TREASURY_HEDGE",
+            "source": "hedge_sleeve",
+        })
+
+    if not holdings:
+        for tk in ("GLD", "GC=F", "SI=F", "IAU"):
+            holdings.append({
+                "ticker": tk,
+                "side": "LONG",
+                "notional_usd": 0,
+                "strategy": "ALPHA_CORE" if tk != "GLD" else "DEFENSIVE_HEDGE",
+                "source": "default_sleeve",
+            })
+
+    pf = pipeline.get("portfolio") or {}
+    return holdings
+
+
+def _metals_market_snapshot(pipeline: dict, regime: dict) -> dict:
+    pf = pipeline.get("portfolio") or {}
+    spot = float(pf.get("last_spot") or 3382.0)
+    return {
+        "gold_proxy": "GC=F",
+        "gold_spot_usd": spot,
+        "silver_proxy": "SI=F",
+        "silver_spot_usd": round(spot / 92.0, 2),
+        "hmm_state": regime.get("hmm_state") or "BULLISH",
+        "p_bullish": regime.get("p_bullish"),
+        "committee_action": (pipeline.get("committee") or {}).get("action_taken"),
+    }
+
+
+def _watchlist_candidates(pipeline: dict) -> list[str]:
+    selector = _load("strategy_selector.json")
+    picks = selector.get("top_picks") or selector.get("selections") or []
+    out: list[str] = []
+    for item in picks:
+        if isinstance(item, dict):
+            tk = item.get("ticker") or item.get("symbol")
+        else:
+            tk = str(item)
+        if tk:
+            out.append(str(tk).upper())
+    for tk in DEFAULT_WATCHLIST:
+        if tk not in out:
+            out.append(tk)
+    return out[:4]
 
 
 def build_live_engine_state() -> dict:
@@ -546,13 +715,35 @@ def build_live_engine_state() -> dict:
 
     open_trades = book.get("open_trades") or []
     hedge_state = book.get("hedge_state") or {}
-    treasury = _load("treasury_hedge.json")
+    from scripts.treasury_hedge_overlay import sanitize_hedge_recommendation
+
+    treasury = sanitize_hedge_recommendation(_load("treasury_hedge.json"))
     trader = _load("multi_strategy_trader.json")
+    pipeline = _load("pipeline_state.json") or {}
+    regime = pipeline.get("regime") or _load("macro_regime.json") or {}
 
     gross_open = sum(float(t.get("notional_usd") or 0) for t in open_trades)
+    holdings = _collect_holdings(book, trader or {}, pipeline)
+    watchlist = _watchlist_candidates(pipeline)
+
+    crisis = _load("crisis_detector.json")
+    crisis_fm = crisis.get("fast_metrics") or {}
+    trader_summary = trader or {}
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "metals_market": _metals_market_snapshot(pipeline, regime),
+        "risk_dials": {
+            "crisis_tier":      crisis.get("tier"),
+            "crisis_score":     crisis.get("score"),
+            "vol_spike_ratio":  crisis_fm.get("vol_spike_ratio"),
+            "rsi_14":           crisis_fm.get("rsi_14"),
+            "macd_hist_pct":    crisis_fm.get("macd_hist_pct"),
+            "drift_10d_pct":    crisis_fm.get("drift_10d_pct"),
+            "vol_breaker":      trader_summary.get("vol_breaker"),
+        },
+        "current_holdings": holdings,
+        "watchlist": watchlist,
         "phase14_book": {
             "cash_usd":           book.get("cash_usd"),
             "starting_capital":   book.get("starting_capital"),
@@ -561,15 +752,7 @@ def build_live_engine_state() -> dict:
             "n_runs":             book.get("n_runs"),
             "open_trades_count":  len(open_trades),
             "open_gross_notional_usd": round(gross_open, 2),
-            "open_positions": [
-                {
-                    "ticker":       t.get("ticker"),
-                    "strategy":     t.get("strategy"),
-                    "side":         t.get("side"),
-                    "notional_usd": t.get("notional_usd"),
-                }
-                for t in open_trades
-            ],
+            "open_positions": holdings[:12],
             "n_closed_trades": len(book.get("closed_trades") or []),
             "hedge_state":   hedge_state,
         },
@@ -585,64 +768,152 @@ def build_live_engine_state() -> dict:
     }
 
 
-def _offline_executive_summary(state: dict, reason: str = "") -> str:
-    """Deterministic 3-sentence fallback when DeepSeek is unavailable."""
-    p14 = state.get("phase14_book") or {}
-    hedge = p14.get("hedge_state") or {}
-    th = state.get("treasury_hedge") or {}
+def _format_holdings_line(holdings: list[dict]) -> str:
+    if not holdings:
+        return "No open positions — book is in cash posture."
+    parts: list[str] = []
+    for h in holdings[:6]:
+        tk = h.get("ticker", "—")
+        side = h.get("side", "LONG")
+        if h.get("notional_usd"):
+            parts.append(f"{side} {tk} ${float(h['notional_usd']):,.0f}")
+        elif h.get("shares"):
+            parts.append(f"{tk} {float(h['shares']):.4f} sh")
+        else:
+            parts.append(f"{side} {tk}")
+    return "Held: " + ", ".join(parts) + "."
 
-    n_open = int(p14.get("open_trades_count") or 0)
-    gross = float(p14.get("open_gross_notional_usd") or 0)
-    strategy = p14.get("last_strategy") or "UNKNOWN"
-    cash = float(p14.get("cash_usd") or 0)
 
-    if n_open:
-        exposure = (
-            f"Open gross exposure is ${gross:,.0f} across {n_open} live position(s); "
-            f"the active sleeve is {strategy} with ${cash:,.0f} cash remaining."
-        )
-    else:
-        exposure = (
-            f"The book is flat with no open positions, running {strategy} "
-            f"with ${cash:,.0f} in cash."
-        )
+# Newsletter labels → payload keys. Legacy labels (MARKET/HOLDINGS/ACTION)
+# are still recognised so older cached generations and prompt drift degrade
+# gracefully. Longest labels first so "THE READ" wins over a stray "READ:".
+_SECTION_LABELS: tuple[tuple[str, str], ...] = (
+    ("HEADLINE",    "headline"),
+    ("THE READ",    "market"),
+    ("POSITIONING", "holdings"),
+    ("WATCHLIST",   "watchlist"),
+    ("THE CALL",    "action"),
+    # Legacy four-line format
+    ("MARKET",      "market"),
+    ("HOLDINGS",    "holdings"),
+    ("ACTION",      "action"),
+)
 
-    mode = hedge.get("mode") or th.get("mode") or "SIGNAL_ONLY"
-    inst = (
-        hedge.get("instrument")
-        or th.get("effective_instrument")
-        or th.get("rec_instrument")
+
+def _parse_labeled_summary(text: str) -> dict[str, str]:
+    """Extract newsletter sections from model output.
+
+    A label line ("THE READ: ...") opens a section; every following line
+    belongs to it until the next label. Sections can therefore run multiple
+    sentences/lines — required for the newsletter format.
+    """
+    out: dict[str, str] = {}
+    current_key: str | None = None
+    buffer: list[str] = []
+
+    def _flush() -> None:
+        nonlocal buffer, current_key
+        if current_key and buffer:
+            joined = " ".join(part for part in buffer if part).strip()
+            if joined:
+                # First label wins (e.g. THE READ over a later legacy MARKET)
+                out.setdefault(current_key, joined)
+        buffer = []
+
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("#*- ").strip()
+        if not stripped:
+            continue
+        upper = stripped.upper()
+        matched = False
+        for label, key in _SECTION_LABELS:
+            prefix = f"{label}:"
+            if upper.startswith(prefix):
+                _flush()
+                current_key = key
+                buffer = [stripped[len(prefix):].strip()]
+                matched = True
+                break
+        if not matched and current_key:
+            buffer.append(stripped)
+    _flush()
+    return out
+
+
+_HMM_PLAIN = {
+    "BULLISH":  "the regime model still leans constructive",
+    "BEARISH":  "the regime model is firmly in risk-off territory",
+    "VOLATILE": "the regime model says conditions are choppy and unstable",
+}
+
+
+def _offline_executive_summary(state: dict, reason: str = "") -> dict[str, str]:
+    """Deterministic newsletter-shaped fallback when DeepSeek is unavailable."""
+    metals = state.get("metals_market") or {}
+    holdings = state.get("current_holdings") or []
+    watchlist = state.get("watchlist") or DEFAULT_WATCHLIST[:2]
+
+    gold = float(metals.get("gold_spot_usd") or 3382.0)
+    silver = float(metals.get("silver_spot_usd") or 36.7)
+    hmm = (metals.get("hmm_state") or "BULLISH").upper()
+    hmm_plain = _HMM_PLAIN.get(hmm, "the regime model is undecided")
+
+    headline = (
+        "Defensive posture holds while the regime sorts itself out"
+        if hmm != "BULLISH"
+        else "Steady as she goes — metals bid intact"
     )
-    alloc = float(
-        hedge.get("allocation_pct")
-        or th.get("effective_allocation_pct")
-        or th.get("rec_allocation_pct")
-        or 0
+    market = (
+        f"Gold is trading around ${gold:,.0f}/oz with silver near ${silver:.2f}/oz, "
+        f"and {hmm_plain}. This is the automated fallback note, so treat it as a "
+        f"status check rather than a full read — the live advisor commentary "
+        f"will resume on the next cycle."
     )
-    sharia = th.get("sharia_cleared", False)
-    if inst and alloc > 0:
-        hedge_line = (
-            f"The Treasury/GLD hedge sleeve is {mode}, holding {inst} at "
-            f"{alloc:.1f}% of book"
-            + (" (GLD Sharia fallback — sovereign debt not cleared)." if not sharia else ".")
+    holdings_line = _format_holdings_line(holdings)
+    if holdings_line.startswith("Held:"):
+        holdings_line += (
+            " Each sleeve is marked to market on every refresh; the hedge "
+            "sleeve, when active, is there to cushion regime shocks."
         )
-    else:
-        hedge_line = (
-            f"The Treasury/GLD hedge sleeve is in {mode} with no defensive "
-            "allocation deployed right now."
-        )
+    watch = (
+        f"Keep {watchlist[0]} and {watchlist[1]} on the radar for the equity "
+        f"sleeve — any add still has to clear the Sharia screen and a "
+        f"high-conviction signal before money moves."
+    )
 
     if state.get("trading_halted"):
-        action = "MANUAL INTERVENTION REQUIRED: the trading halt flag is active — review before resuming."
+        action = (
+            "HALT is active — nothing trades until you clear the override. "
+            "Review the dashboard panels, then authorize the pipeline when "
+            "you're comfortable."
+        )
     elif reason:
         action = (
-            f"DeepSeek briefing is offline ({reason}); use the Phase XIV dashboard "
-            "for live exposure and hedge detail."
+            f"The live briefing is offline ({reason}), so lean on the "
+            f"dashboard panels for risk until it's back. No portfolio action "
+            f"is required from you right now."
         )
     else:
-        action = "No manual intervention needed — the engine is operating normally."
+        action = (
+            "No intervention needed. Authorize the pipeline when you're "
+            "ready and the system will keep running in paper mode."
+        )
 
-    return f"{exposure} {hedge_line} {action}"
+    sections = {
+        "headline": headline,
+        "market": market,
+        "holdings": holdings_line,
+        "watchlist": watch,
+        "action": action,
+    }
+    sections["summary"] = (
+        f"HEADLINE: {headline}\n"
+        f"THE READ: {market}\n"
+        f"POSITIONING: {holdings_line}\n"
+        f"WATCHLIST: {watch}\n"
+        f"THE CALL: {action}"
+    )
+    return sections
 
 
 def _call_deepseek_executive_summary(state: dict) -> tuple[str | None, str | None]:
@@ -657,7 +928,8 @@ def _call_deepseek_executive_summary(state: dict) -> tuple[str | None, str | Non
     user_msg = (
         "LIVE ENGINE STATE (JSON):\n"
         f"{json.dumps(state, indent=2, default=str)}\n\n"
-        "Reply with exactly three plain-English sentences. No bullet points."
+        "Write today's edition of The QCTF Daily using the HEADLINE / "
+        "THE READ / POSITIONING / WATCHLIST / THE CALL sections."
     )
     body = {
         "model": DEEPSEEK_MODEL,
@@ -665,15 +937,18 @@ def _call_deepseek_executive_summary(state: dict) -> tuple[str | None, str | Non
             {"role": "system", "content": DUMB_MODE_CRO_SYSTEM},
             {"role": "user",   "content": user_msg},
         ],
-        "temperature": 0.2,
-        "max_tokens":  220,
+        # Newsletter voice needs room to breathe: bigger budget + warmer
+        # temperature than the old 4-line CRO format. Facts remain pinned to
+        # the dossier by the system prompt's hard rules.
+        "temperature": 0.55,
+        "max_tokens":  1500,
     }
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type":  "application/json",
     }
     try:
-        resp = requests.post(DEEPSEEK_URL, json=body, headers=headers, timeout=30)
+        resp = requests.post(DEEPSEEK_URL, json=body, headers=headers, timeout=75)
         if resp.status_code == 429:
             return None, "rate_limited"
         resp.raise_for_status()
@@ -692,16 +967,39 @@ def _call_deepseek_executive_summary(state: dict) -> tuple[str | None, str | Non
 
 def executive_summary_dumb_mode() -> dict:
     """Live CRO summary from phase14_book.json via DeepSeek, with offline fallback."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     state = build_live_engine_state()
     if not state:
-        summary = _offline_executive_summary(
-            {"phase14_book": {}}, reason="phase14_book.json not found"
+        sections = _offline_executive_summary(
+            {"phase14_book": {}, "watchlist": DEFAULT_WATCHLIST[:2]},
+            reason="phase14_book.json not found",
         )
-        return {"summary": summary, "offline": True, "reason": "no_state"}
+        return {
+            **sections,
+            "generated_at": now,
+            "offline": True,
+            "reason": "no_state",
+        }
 
     text, err = _call_deepseek_executive_summary(state)
     if text and not text.startswith("("):
-        return {"summary": text, "offline": False}
+        parsed = _parse_labeled_summary(text)
+        if parsed:
+            return {
+                "summary": text.strip(),
+                "headline": parsed.get("headline", ""),
+                "market": parsed.get("market", ""),
+                "holdings": parsed.get("holdings", ""),
+                "watchlist": parsed.get("watchlist", ""),
+                "action": parsed.get("action", ""),
+                "generated_at": now,
+                "offline": False,
+            }
+        return {
+            "summary": text.strip(),
+            "generated_at": now,
+            "offline": False,
+        }
 
     reason_map = {
         "no_api_key":      "DEEPSEEK_API_KEY not configured",
@@ -712,10 +1010,12 @@ def executive_summary_dumb_mode() -> dict:
         "error":           "DeepSeek call failed",
     }
     reason = reason_map.get(err or "error", "DeepSeek unavailable")
+    sections = _offline_executive_summary(state, reason=reason)
     return {
-        "summary": _offline_executive_summary(state, reason=reason),
+        **sections,
+        "generated_at": now,
         "offline": True,
-        "reason":  err,
+        "reason": err,
     }
 
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useDeployment } from "@/components/providers/DeploymentProvider";
 import { SNAPSHOT_API_URL } from "@/lib/config";
 import {
@@ -10,11 +10,13 @@ import {
 import { MOCK_EXECUTIVE_SUMMARY } from "@/lib/mock-executive-summary";
 
 interface UseExecutiveSummaryResult {
+  payload: ExecutiveSummaryPayload | null;
   summary: string;
   generatedAt: string | null;
   isLoading: boolean;
   error: string | null;
   isSandbox: boolean;
+  refetch: () => Promise<void>;
 }
 
 export function useExecutiveSummary(): UseExecutiveSummaryResult {
@@ -25,7 +27,7 @@ export function useExecutiveSummary(): UseExecutiveSummaryResult {
   const [isLoading, setIsLoading] = useState(!isSandbox);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     if (isSandbox) {
       setPayload(MOCK_EXECUTIVE_SUMMARY);
       setIsLoading(false);
@@ -33,39 +35,41 @@ export function useExecutiveSummary(): UseExecutiveSummaryResult {
       return;
     }
 
-    const controller = new AbortController();
-
-    const load = async () => {
-      setIsLoading(true);
-      try {
-        const data = await fetchExecutiveSummary(
-          SNAPSHOT_API_URL,
-          controller.signal
-        );
-        if (controller.signal.aborted) return;
-        setPayload(data);
-        setError(null);
-      } catch (err) {
-        if (controller.signal.aborted) return;
-        setError(
-          err instanceof Error ? err.message : "Executive summary unavailable"
-        );
-      } finally {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
+    setIsLoading(true);
+    try {
+      const data = await fetchExecutiveSummary(SNAPSHOT_API_URL, signal);
+      if (signal?.aborted) return;
+      setPayload(data);
+      setError(null);
+    } catch (err) {
+      if (signal?.aborted) return;
+      setError(
+        err instanceof Error ? err.message : "Executive summary unavailable"
+      );
+    } finally {
+      if (!signal?.aborted) {
+        setIsLoading(false);
       }
-    };
-
-    void load();
-    return () => controller.abort();
+    }
   }, [isSandbox]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+
+  const refetch = useCallback(async () => {
+    await load();
+  }, [load]);
+
   return {
+    payload,
     summary: payload?.summary ?? "",
     generatedAt: payload?.generated_at ?? null,
     isLoading,
     error,
     isSandbox,
+    refetch,
   };
 }

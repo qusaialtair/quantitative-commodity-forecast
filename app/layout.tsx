@@ -14,7 +14,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Altair MK1",
+  title: "QCTF Model",
   description: "Institutional quantitative trading terminal — demo deployment",
 };
 

@@ -7,7 +7,7 @@ all Phase I-XIV engines, serves them as REST endpoints plus a /ws live
 channel that streams pipeline_state updates whenever the file changes.
 
 Endpoints:
-    GET  /api/snapshot                     Altair MK1 dashboard live packet
+    GET  /api/snapshot                     QCTF Model dashboard live packet
     GET  /api/health                       service health
     GET  /api/pipeline                     full pipeline_state.json
     GET  /api/state/<key>                  a single key from pipeline_state
@@ -22,6 +22,12 @@ Endpoints:
     POST /api/run-pipeline                 trigger master_controller (background)
     WS   /ws                               live updates (push on file change)
 
+Background: market-data ingest worker (5 min default) fetches live marks and runs
+a silent MTM refresh on phase14_book.json — see MARKET_DATA_INGEST_* env vars.
+
+Mutating control endpoints require header X-QCTF-Admin-Token (or Authorization:
+Bearer) matching QCTF_ADMIN_TOKEN in .env (dev fallback when unset).
+
 Launch:
     python3 -m uvicorn api.server:app --reload --port 8000
 
@@ -32,17 +38,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import re
+import secrets
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Security, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
@@ -50,14 +62,72 @@ SCRIPTS_DIR = ROOT / "scripts"
 
 sys.path.insert(0, str(ROOT))
 
-app = FastAPI(title="Gold Trading AI Backend", version="14.0")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except Exception:
+    pass
 
-# Permissive CORS — Next.js dev runs on 3000, we run on 8000
+app = FastAPI(title="Gold Trading AI Backend", version="14.0")
+logger = logging.getLogger("qctf.ingest")
+
+_SAFE_JSON_STEM = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_SAFE_CACHE_NS = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_CHAT_TOPICS = frozenset({"all", "risk", "regime", "execution", "performance"})
+
+# ── Admin token auth (mutating endpoints only) ────────────────────────────────
+_DEV_ADMIN_TOKEN = os.getenv("QCTF_ADMIN_TOKEN", "")
+_ADMIN_TOKEN_HEADER = APIKeyHeader(name="X-QCTF-Admin-Token", auto_error=False)
+
+
+def _expected_admin_token() -> str:
+    configured = (os.getenv("QCTF_ADMIN_TOKEN") or "").strip()
+    return configured or _DEV_ADMIN_TOKEN
+
+
+async def verify_admin_token(
+    x_qctf_admin_token: str | None = Security(_ADMIN_TOKEN_HEADER),
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Reject mutating control-plane calls without a valid admin token."""
+    expected = _expected_admin_token()
+    provided = (x_qctf_admin_token or "").strip()
+    if not provided and authorization:
+        scheme, _, credential = authorization.partition(" ")
+        if scheme.lower() == "bearer" and credential.strip():
+            provided = credential.strip()
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+_admin_only = [Depends(verify_admin_token)]
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(
+    _request: Request, _exc: RequestValidationError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Invalid request payload"},
+    )
+
+
+# CORS — Next.js dev (3000 / 8501) → FastAPI (8000) when NEXT_PUBLIC_API_URL is set.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+    ],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -71,6 +141,89 @@ def _load_json(name: str) -> dict | list | None:
     try:
         return json.loads(p.read_text())
     except Exception:
+        return None
+
+
+def _safe_json_path(stem: str) -> Path:
+    """Resolve data/<stem>.json and reject path traversal."""
+    if not _SAFE_JSON_STEM.fullmatch(stem):
+        raise HTTPException(status_code=400, detail="invalid name")
+    candidate = (DATA_DIR / f"{stem}.json").resolve()
+    if not candidate.is_relative_to(DATA_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="invalid name")
+    return candidate
+
+
+def _sanitized_treasury_hedge(raw: dict | None) -> dict:
+    from scripts.treasury_hedge_overlay import sanitize_hedge_recommendation
+    return sanitize_hedge_recommendation(raw or {})
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or str(default)).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _market_data_ingest_enabled() -> bool:
+    return _env_bool("MARKET_DATA_INGEST_ENABLED", True)
+
+
+def _market_data_ingest_interval_sec() -> float:
+    return max(30.0, _env_float("MARKET_DATA_INGEST_INTERVAL_SEC", 300.0))
+
+
+def _market_data_ingest_continuous() -> bool:
+    return _env_bool("MARKET_DATA_INGEST_CONTINUOUS", True)
+
+
+def _us_equity_market_open(now: datetime | None = None) -> bool:
+    """US cash session Mon–Fri 09:30–16:00 America/New_York."""
+    ts = now or datetime.now(ZoneInfo("America/New_York"))
+    if ts.weekday() >= 5:
+        return False
+    minutes = ts.hour * 60 + ts.minute
+    return (9 * 60 + 30) <= minutes < (16 * 60)
+
+
+def _market_data_ingest_should_run(now: datetime | None = None) -> bool:
+    if not _market_data_ingest_enabled():
+        return False
+    if _market_data_ingest_continuous():
+        return True
+    return _us_equity_market_open(now)
+
+
+async def _run_market_data_ingest_cycle() -> dict | None:
+    """Fetch live marks and run a silent MTM refresh on the Phase XIV book."""
+    try:
+        from scripts.multi_strategy_trader import run_mtm_refresh
+
+        result = await asyncio.to_thread(run_mtm_refresh)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        await manager.broadcast({
+            "type": "trading_updated",
+            "source": "market_data_ingest",
+            "at": now,
+            "ingest": result,
+            "trading": load_latest_trading_data(),
+        })
+        logger.info(
+            "market ingest OK — equity=%s open_pl=%s marks=%s exits=%s",
+            result.get("book_equity_usd"),
+            result.get("open_pl_usd"),
+            result.get("marks_fetched"),
+            result.get("n_exits"),
+        )
+        return result
+    except Exception as exc:
+        logger.warning("market data ingest cycle failed: %s", exc)
         return None
 
 
@@ -133,13 +286,10 @@ def _load_csv(name: str, limit: int = 5000) -> list[dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 # REST endpoints
 # ──────────────────────────────────────────────────────────────────────────────
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = (os.environ.get(name) or str(default)).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
 HALT_FLAG_FILE = DATA_DIR / "trading_halted.flag"
 OVERRIDE_FILE = DATA_DIR / "operator_override.json"
+PIPELINE_STATUS_FILE = DATA_DIR / "pipeline_run_status.json"
+EXECUTIVE_BRIEFING_FILE = DATA_DIR / "executive_briefing.json"
 
 
 def _mock_phase14_book() -> dict:
@@ -185,7 +335,7 @@ def load_latest_trading_data() -> dict:
         source = "mock"
 
     trader = _load_json("multi_strategy_trader.json") or {}
-    hedge = _load_json("treasury_hedge.json") or {}
+    hedge = _sanitized_treasury_hedge(_load_json("treasury_hedge.json"))
     override = _load_json("operator_override.json")
 
     open_trades = book.get("open_trades") or []
@@ -226,16 +376,20 @@ def _build_dashboard_snapshot() -> dict:
     book = trading.get("trader") or {}
     p14 = trading.get("phase14_book") or {}
     metrics = trading.get("metrics") or {}
-    hedge = trading.get("treasury_hedge") or _load_json("treasury_hedge.json") or {}
+    hedge = _sanitized_treasury_hedge(
+        trading.get("treasury_hedge") or _load_json("treasury_hedge.json")
+    )
     basket = _load_json("trade_basket.json") or {}
 
-    total_equity = float(metrics.get("book_equity_usd") or 100_000.0)
+    total_equity = max(0.0, float(metrics.get("book_equity_usd") or 0.0))
     open_pl = float(metrics.get("open_pl_usd") or 0.0)
-    daily_pnl_pct = (open_pl / total_equity * 100.0) if total_equity else 0.0
+    daily_pnl_pct = (open_pl / total_equity * 100.0) if total_equity > 0 else 0.0
 
     open_notional = float(metrics.get("open_gross_notional_usd") or 0.0)
     gross_exposure = (
-        (open_notional / total_equity * 100.0) if total_equity and open_notional else float(
+        (open_notional / total_equity * 100.0)
+        if total_equity > 0 and open_notional > 0
+        else float(
             basket.get("gross_exposure_target_pct")
             or (float(basket.get("long_alloc_pct") or 0.0)
                 + float(basket.get("short_alloc_pct") or 0.0))
@@ -243,9 +397,7 @@ def _build_dashboard_snapshot() -> dict:
         )
     )
 
-    sharia_cleared = _env_bool("TREASURY_SHARIA_CLEARED", False)
-    if hedge.get("sharia_cleared") is not None:
-        sharia_cleared = bool(hedge.get("sharia_cleared"))
+    sharia_cleared = bool(hedge.get("sharia_cleared"))
 
     hedge_state = metrics.get("hedge_state") or {}
     defensive_pct = float(
@@ -319,7 +471,7 @@ def _build_dashboard_snapshot() -> dict:
 
 @app.get("/api/snapshot")
 def dashboard_snapshot(response: Response) -> dict:
-    """Live dashboard packet for the Altair MK1 Next.js terminal."""
+    """Live dashboard packet for the QCTF Model Next.js terminal."""
     payload = _build_dashboard_snapshot()
     payload["trading"] = load_latest_trading_data()
     response.headers["Cache-Control"] = "no-store"
@@ -465,23 +617,8 @@ async def run_multi_asset_stress_endpoint(metals_weight: float = 0.60,
 
 
 class ChatRequest(BaseModel):
-    question: str
-    topic: str | None = None
-
-
-@app.post("/api/chat")
-def chat(req: ChatRequest) -> dict:
-    """
-    DeepSeek-backed conversational layer over the institutional stack.
-    Routes the operator's question through `deepseek_explainer.explain`
-    with the live pipeline_state as dossier.
-    """
-    try:
-        from scripts.deepseek_explainer import explain
-        turn = explain(req.question, topic=req.topic)
-        return turn
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"chat failed: {exc}")
+    question: str = Field(..., min_length=1, max_length=4000)
+    topic: str | None = Field(None, max_length=32)
 
 
 @app.get("/api/conviction-weights")
@@ -689,11 +826,16 @@ def cache_stats_endpoint() -> dict:
     return cache_stats()
 
 
-@app.post("/api/cache-invalidate")
+@app.post("/api/cache-invalidate", dependencies=_admin_only)
 def cache_invalidate_endpoint(namespace: str | None = None) -> dict:
     """Wipe one (or all) cache namespaces."""
     from scripts.cache_layer import cache_invalidate
-    n = cache_invalidate(namespace)
+    if namespace is not None and not _SAFE_CACHE_NS.fullmatch(namespace):
+        raise HTTPException(status_code=400, detail="invalid cache namespace")
+    try:
+        n = cache_invalidate(namespace)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid cache namespace")
     return {"status": "OK", "removed": n, "namespace": namespace or "ALL"}
 
 
@@ -784,22 +926,42 @@ def briefing() -> dict:
     return _load_json("executive_briefing.json") or {}
 
 
+def _persist_executive_briefing(payload: dict) -> dict:
+    """Write executive briefing JSON for UI + Telegram consumers."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    EXECUTIVE_BRIEFING_FILE.write_text(json.dumps(payload, indent=2, default=str))
+    return payload
+
+
+def _generate_executive_briefing() -> dict:
+    from scripts.deepseek_explainer import executive_summary_dumb_mode
+
+    return _persist_executive_briefing(executive_summary_dumb_mode())
+
+
 @app.get("/api/executive-summary")
 def executive_summary(response: Response) -> dict:
-    """Live CRO 'Dumb Mode' summary — reads phase14_book.json, calls DeepSeek."""
+    """The QCTF Daily — newsletter-style advisor briefing via DeepSeek.
+
+    Payload is long-form by design (HEADLINE / THE READ / POSITIONING /
+    WATCHLIST / THE CALL sections, typically 250-450 words). No truncation
+    is applied server-side; consumers handle their own display budgets.
+    """
     response.headers["Cache-Control"] = "no-store"
     try:
-        from scripts.deepseek_explainer import executive_summary_dumb_mode
-        result = executive_summary_dumb_mode()
-        return {"summary": result.get("summary") or ""}
+        return _generate_executive_briefing()
     except Exception as exc:
-        return {
+        fallback = {
+            "headline": "Briefing temporarily offline",
             "summary": (
-                "Executive summary temporarily offline. "
+                "The QCTF Daily is temporarily offline. "
                 "Review the Phase XIV book and Treasury hedge panels for live exposure. "
                 f"({type(exc).__name__})"
             ),
+            "offline": True,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+        return fallback
 
 
 # ─── Phase XXIV: Execution Monitor endpoints ──────────────────────────────────
@@ -888,7 +1050,7 @@ class OverrideRequest(BaseModel):
     action: Literal["AUTHORIZE", "HALT"]
 
 
-@app.post("/api/override")
+@app.post("/api/override", dependencies=_admin_only)
 async def portfolio_override(req: OverrideRequest) -> dict:
     """Portfolio Manager control loop — HALT suspends routing; AUTHORIZE clears it."""
     action = req.action.upper()
@@ -905,6 +1067,16 @@ async def portfolio_override(req: OverrideRequest) -> dict:
             "action": "HALT",
             "liquidate_to_cash": True,
         }))
+        briefing: dict = {}
+        try:
+            briefing = _generate_executive_briefing()
+        except Exception as exc:
+            logger.warning("briefing on halt failed: %s", exc)
+        try:
+            from scripts.telegram_notifier import notify_system_halted
+            notify_system_halted(source="EXECUTIVE_OVERRIDE", briefing=briefing)
+        except Exception as exc:
+            logger.warning("telegram halt notify failed: %s", exc)
         message = "Emergency halt engaged — liquidate-to-cash routing armed"
     else:
         try:
@@ -925,14 +1097,8 @@ async def portfolio_override(req: OverrideRequest) -> dict:
         pipeline_status = "ALREADY_RUNNING" if _pipeline_lock.locked() else "STARTED"
         if pipeline_status == "STARTED":
             async def _runner():
-                async with _pipeline_lock:
-                    proc = await asyncio.create_subprocess_exec(
-                        "python3", str(SCRIPTS_DIR / "master_controller.py"),
-                        cwd=str(ROOT),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    await proc.wait()
+                status = await _execute_master_controller("EXECUTIVE_OVERRIDE")
+                await _post_authorize_side_effects(status)
 
             asyncio.create_task(_runner())
 
@@ -956,7 +1122,7 @@ async def portfolio_override(req: OverrideRequest) -> dict:
     }
 
 
-@app.post("/api/halt-trading")
+@app.post("/api/halt-trading", dependencies=_admin_only)
 def halt_trading_endpoint(req: HaltRequest) -> dict:
     """Toggle the durable kill-switch. Writing creates data/trading_halted.flag;
     every order_router.route_order returns HALTED while the flag exists."""
@@ -993,7 +1159,10 @@ def run_reconciler_endpoint() -> dict:
 @app.get("/api/treasury-hedge")
 def treasury_hedge_endpoint() -> dict:
     """Current Treasury-hedge recommendation (data/treasury_hedge.json)."""
-    return _load_json("treasury_hedge.json") or {
+    raw = _load_json("treasury_hedge.json")
+    if raw:
+        return _sanitized_treasury_hedge(raw)
+    return {
         "engine": "treasury_hedge_overlay",
         "mode": "SIGNAL_ONLY",
         "instrument": None,
@@ -1022,11 +1191,6 @@ def run_treasury_hedge_endpoint() -> dict:
 
 # ─── Agent chat  ──────────────────────────────────────────────────────────────
 
-class ChatRequest(BaseModel):
-    question: str
-    topic: str | None = None
-
-
 # Map UI topic slugs → deepseek_explainer internal topic keys.
 # "all" → None (full dossier).  "regime" → "macro" (same engines, different label).
 _CHAT_TOPIC_MAP: dict[str, str | None] = {
@@ -1046,22 +1210,27 @@ async def chat_endpoint(req: ChatRequest) -> dict:
     try:
         from scripts.deepseek_explainer import explain
         slug = (req.topic or "all").lower()
+        if slug not in _CHAT_TOPICS:
+            raise HTTPException(status_code=400, detail="invalid chat topic")
         internal_topic = _CHAT_TOPIC_MAP.get(slug)  # None = full dossier
         turn = explain(question=req.question, topic=internal_topic)
         return turn
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)[:400])
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="chat request failed")
 
 
 @app.get("/api/engines/{name}")
 def engine_json(name: str) -> Any:
     """Generic JSON-file proxy.  Reads data/<name>.json."""
-    if "/" in name or ".." in name:
-        raise HTTPException(status_code=400, detail="invalid name")
-    data = _load_json(f"{name}.json")
-    if data is None:
+    path = _safe_json_path(name)
+    if not path.exists():
         raise HTTPException(status_code=404, detail=f"{name}.json not found")
-    return data
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        raise HTTPException(status_code=500, detail="engine file unreadable")
 
 
 @app.post("/api/regen-briefing")
@@ -1081,20 +1250,101 @@ def regen_briefing() -> dict:
 _pipeline_lock = asyncio.Lock()
 
 
-@app.post("/api/run-pipeline")
+def _write_pipeline_status(payload: dict) -> dict:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PIPELINE_STATUS_FILE.write_text(json.dumps(payload, indent=2))
+    return payload
+
+
+async def _execute_master_controller(source: str = "API") -> dict:
+    """Run master_controller.py and persist exit status for the UI."""
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _write_pipeline_status({
+        "source": source,
+        "started_at": started,
+        "finished_at": None,
+        "exit_code": None,
+        "success": None,
+        "running": True,
+    })
+
+    async with _pipeline_lock:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", str(SCRIPTS_DIR / "master_controller.py"),
+            cwd=str(ROOT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await proc.communicate()
+
+    finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    status = {
+        "source": source,
+        "started_at": started,
+        "finished_at": finished,
+        "exit_code": proc.returncode,
+        "success": proc.returncode == 0,
+        "stdout_tail": (stdout_b.decode(errors="replace")[-2000:] if stdout_b else ""),
+        "stderr_tail": (stderr_b.decode(errors="replace")[-2000:] if stderr_b else ""),
+    }
+    status["running"] = False
+    _write_pipeline_status(status)
+    logger.info(
+        "master_controller finished source=%s exit=%s",
+        source,
+        proc.returncode,
+    )
+    return status
+
+
+async def _post_authorize_side_effects(pipeline_status: dict) -> None:
+    """Regenerate DeepSeek briefing and broadcast Telegram after AUTHORIZE."""
+    briefing: dict = {}
+    try:
+        briefing = _generate_executive_briefing()
+    except Exception as exc:
+        logger.warning("executive briefing after authorize failed: %s", exc)
+
+    try:
+        from scripts.telegram_notifier import notify_operator_authorize, notify_post_authorize_execution
+        notify_operator_authorize(pipeline_status, briefing)
+        notify_post_authorize_execution()
+    except Exception as exc:
+        logger.warning("telegram after authorize failed: %s", exc)
+
+    await manager.broadcast({
+        "type": "pipeline_finished",
+        "pipeline_status": pipeline_status,
+        "briefing": briefing,
+        "trading": load_latest_trading_data(),
+    })
+
+
+@app.get("/api/pipeline-status")
+def pipeline_status() -> dict:
+    """Last master_controller run triggered by AUTHORIZE or /api/run-pipeline."""
+    data = _load_json("pipeline_run_status.json")
+    if not data:
+        return {"status": "NO_RUN", "success": None, "running": False}
+    if data.get("running"):
+        data["status"] = "RUNNING"
+    elif data.get("success"):
+        data["status"] = "SUCCESS"
+    else:
+        data["status"] = "FAILED"
+    return data
+
+
+@app.post("/api/run-pipeline", dependencies=_admin_only)
 async def run_pipeline() -> dict:
     """Trigger a master_controller run in the background.  Returns immediately."""
     if _pipeline_lock.locked():
         return {"status": "ALREADY_RUNNING"}
 
     async def _runner():
-        async with _pipeline_lock:
-            proc = await asyncio.create_subprocess_exec(
-                "python3", str(SCRIPTS_DIR / "master_controller.py"),
-                cwd=str(ROOT),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
+        status = await _execute_master_controller("run-pipeline")
+        if status.get("success"):
+            await _post_authorize_side_effects(status)
 
     asyncio.create_task(_runner())
     return {"status": "STARTED"}
@@ -1155,8 +1405,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 
 @app.on_event("startup")
-async def start_file_watcher() -> None:
-    """Poll engine JSON mtimes; broadcast live trading + pipeline updates."""
+async def start_background_workers() -> None:
+    """File watcher + live market-data ingestion loop."""
     watch_files = (
         "pipeline_state.json",
         "phase14_book.json",
@@ -1196,6 +1446,24 @@ async def start_file_watcher() -> None:
             await asyncio.sleep(2.0)
 
     asyncio.create_task(watcher())
+
+    async def market_ingest_worker() -> None:
+        interval = _market_data_ingest_interval_sec()
+        logger.info(
+            "market data ingest worker started (interval=%ss continuous=%s)",
+            interval,
+            _market_data_ingest_continuous(),
+        )
+        while True:
+            try:
+                if _market_data_ingest_should_run():
+                    await _run_market_data_ingest_cycle()
+            except Exception as exc:
+                logger.warning("market ingest worker error: %s", exc)
+            await asyncio.sleep(interval)
+
+    if _market_data_ingest_enabled():
+        asyncio.create_task(market_ingest_worker())
 
 
 if __name__ == "__main__":

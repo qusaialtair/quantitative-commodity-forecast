@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Dockerfile — Next.js Frontend (Altair MK1 Terminal)
+#  Base: node:18-alpine (multi-stage standalone build)
+#  Target: Oracle Linux 9 AMD Micro (1 vCPU, 1 GB RAM)
+#  Memory budget: 250 MB (enforced by docker-compose mem_limit)
+#
+#  Build strategy:
+#    Stage 1 (deps)    — install node_modules
+#    Stage 2 (builder) — run `next build` (output: 'standalone')
+#    Stage 3 (runner)  — copy ONLY .next/standalone + .next/static + public/
+#                        Result: ~150MB runtime image, no node_modules overhead
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: Install dependencies ────────────────────────────────────────────
+FROM node:18-alpine AS deps
+
+# libc6-compat is needed by some native Node.js addons on Alpine
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+
+# Install production + dev deps (dev needed for the build step)
+RUN npm ci --frozen-lockfile
+
+
+# ── Stage 2: Build ────────────────────────────────────────────────────────────
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Bring in installed node_modules from stage 1
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy all source files
+COPY . .
+
+# Proxy target at build time — points to the backend container on the
+# internal Docker network. Can be overridden at build with --build-arg.
+ARG QCTF_API_PROXY_TARGET=http://backend:8000
+ENV QCTF_API_PROXY_TARGET=$QCTF_API_PROXY_TARGET
+
+# Dashboard mode: lock to RECRUITER SANDBOX for the public build.
+# Switch to "PRODUCTION AUTOMATED" at runtime via docker-compose environment.
+ENV NEXT_PUBLIC_DASHBOARD_MODE="RECRUITER SANDBOX"
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+RUN npm run build
+
+
+# ── Stage 3: Minimal runtime image ───────────────────────────────────────────
+FROM node:18-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+# Runtime port for the standalone server
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+# Unprivileged runtime user
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser  --system --uid 1001 nextjs
+
+# Copy the standalone server bundle produced by `output: 'standalone'`
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+
+# Copy static assets (CSS, JS chunks, images) into the standalone structure
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# Copy public assets (showcase.png, SVGs, etc.)
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
+USER nextjs
+
+EXPOSE 3000
+
+# The standalone build produces server.js at the root of the output directory
+CMD ["node", "server.js"]

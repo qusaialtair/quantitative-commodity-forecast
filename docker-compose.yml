@@ -1,0 +1,97 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  docker-compose.yml — Altair MK1 Trading Engine
+#  Target: Oracle Linux 9 AMD Micro (1 vCPU / 1 GB RAM + 4 GB swap)
+#
+#  Memory allocation (total: ~700 MB hard cap, leaving OS headroom):
+#    nginx     →  32  MB   (static proxy, near-zero footprint)
+#    backend   →  350 MB   (FastAPI + uvicorn + pandas + yfinance)
+#    frontend  →  250 MB   (Next.js standalone Node.js server)
+#    ─────────────────────
+#    Total     →  632 MB   (leaves ~368 MB for OS + kernel + buffers)
+#
+#  Swap (4 GB) absorbs the Next.js BUILD spike — not the runtime.
+#  All containers share a bridge network. nginx is the only public listener.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Reverse Proxy ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: qctf_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    mem_limit: 32m
+    memswap_limit: 32m        # disable swap for nginx; it must never page
+    cpu_shares: 256           # low priority — proxy overhead is minimal
+    networks:
+      - qctf_net
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: qctf_backend
+    restart: unless-stopped
+    expose:
+      - "8000"                # not public; only reachable inside qctf_net
+    env_file:
+      - .env                  # DeepSeek, Alpaca, Telegram, FRED keys
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      # Pipeline state files (JSON produced by the nightly cron) are mounted
+      # from the host so they persist across container restarts.
+      - ./data:/app/data
+    mem_limit: 350m
+    memswap_limit: 512m       # allow up to 162m swap headroom for spike loads
+    cpu_shares: 512
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - qctf_net
+
+  # ── Next.js Frontend ───────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # Tell Next.js to route /qctf-backend/* to the backend container
+        QCTF_API_PROXY_TARGET: http://backend:8000
+    container_name: qctf_frontend
+    restart: unless-stopped
+    expose:
+      - "3000"                # not public; nginx proxies to this
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+      # Set to "PRODUCTION AUTOMATED" to enable live polling of the backend.
+      # Leave as "RECRUITER SANDBOX" to serve mock data only (safe default).
+      - NEXT_PUBLIC_DASHBOARD_MODE=PRODUCTION AUTOMATED
+      - QCTF_API_PROXY_TARGET=http://backend:8000
+    mem_limit: 250m
+    memswap_limit: 400m       # allow swap headroom for GC spikes
+    cpu_shares: 512
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - qctf_net
+
+# ── Shared network ─────────────────────────────────────────────────────────
+networks:
+  qctf_net:
+    driver: bridge

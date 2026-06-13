@@ -30,5 +30,5 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules", "altair-mk1", "web"]
+  "exclude": ["node_modules", "qctf-model", "web"]
 }

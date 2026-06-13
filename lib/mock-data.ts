@@ -1,4 +1,8 @@
 import { buildShariaGateState } from "@/lib/compliance";
+import {
+  MOCK_HOLDINGS,
+  MOCK_PERFORMANCE_HERO,
+} from "@/lib/mock-holdings";
 import { buildStrategies } from "@/lib/strategies";
 import type { DashboardState, StrategyAllocation } from "@/lib/types";
 
@@ -38,4 +42,6 @@ export const MOCK_DASHBOARD: DashboardState = {
   },
   compliance,
   strategies,
+  holdings: MOCK_HOLDINGS,
+  performanceHero: MOCK_PERFORMANCE_HERO,
 };

@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  FastAPI Backend — Slim runtime dependencies
+#  Full ML stack is NOT installed here — this container is the API bridge only.
+#  Heavy engines (torch, transformers, lightgbm) run on the nightly cron host.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# FastAPI runtime
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+
+# HTTP clients (snapshot polling, DeepSeek, Perplexity, Telegram)
+httpx>=0.27.0
+requests>=2.32.0
+
+# Data layer (reads pipeline JSON / CSV files)
+pandas>=2.2.0
+numpy>=1.26.0
+
+# Market data (5-min MTM ingest worker)
+yfinance>=0.2.40
+
+# Config & secrets
+python-dotenv>=1.0.0
+
+# Caching (disk-based prompt/response cache)
+diskcache>=5.6.3
+
+# Utilities
+python-multipart>=0.0.9
+anyio>=4.4.0

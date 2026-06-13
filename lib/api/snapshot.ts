@@ -1,8 +1,19 @@
+import {
+  mapApiHoldingRow,
+  mapApiPerformanceHero,
+  type ApiHoldingRow,
+  type ApiSessionPerformanceHero,
+} from "@/lib/api/holdings";
 import { buildShariaGateState } from "@/lib/compliance";
-import { buildStrategies } from "@/lib/strategies";
+import {
+  MOCK_HOLDINGS,
+  MOCK_PERFORMANCE_HERO,
+} from "@/lib/mock-holdings";
 import type {
   BookMetrics,
   DashboardState,
+  HoldingRow,
+  SessionPerformanceHero,
   ShariaGateState,
   StrategyAllocation,
 } from "@/lib/types";
@@ -30,6 +41,8 @@ export interface ApiSnapshot {
   };
   generated_at: string;
   checksum?: string;
+  holdings?: ApiHoldingRow[];
+  performance_hero?: ApiSessionPerformanceHero;
 }
 
 export class SnapshotFetchError extends Error {
@@ -47,16 +60,57 @@ function mapStrategyRow(
   row: StrategySnapshotRow,
   fallbackColor: string
 ): StrategyAllocation {
+  const shortCode =
+    id === "alpha_core"
+      ? "AC"
+      : row.instruments[0] === "GLD"
+        ? "GLD"
+        : "DTH";
+
   return {
     id,
     name: row.name,
-    shortCode: id === "alpha_core" ? "AC" : row.instruments[0] === "GLD" ? "GLD" : "DTH",
+    shortCode,
     allocationPct: row.allocation_pct,
     notionalUsd: row.notional_usd,
     pnlContributionUsd: row.pnl_contribution_usd,
     pnlContributionPct: row.pnl_contribution_pct,
     instruments: row.instruments,
     color: row.color ?? fallbackColor,
+  };
+}
+
+const MOCK_BOOK_EQUITY = 100_000;
+
+function scaleHoldings(
+  rows: HoldingRow[],
+  totalEquity: number
+): HoldingRow[] {
+  const scale = totalEquity / MOCK_BOOK_EQUITY;
+  if (scale === 1) return rows;
+
+  return rows.map((row) => ({
+    ...row,
+    notionalUsd: row.notionalUsd * scale,
+    livePnlUsd: row.livePnlUsd * scale,
+  }));
+}
+
+function derivePerformanceHero(
+  strategies: StrategyAllocation[]
+): SessionPerformanceHero {
+  const best = [...strategies].sort(
+    (a, b) => b.pnlContributionUsd - a.pnlContributionUsd
+  )[0];
+
+  return {
+    strategyId: best.id,
+    strategyName: best.name,
+    winRatePct: MOCK_PERFORMANCE_HERO.winRatePct,
+    pnlContributionUsd: best.pnlContributionUsd,
+    pnlContributionPct: best.pnlContributionPct,
+    sessionLabel: MOCK_PERFORMANCE_HERO.sessionLabel,
+    accentColor: best.color,
   };
 }
 
@@ -92,7 +146,15 @@ export function mapSnapshotToDashboard(snapshot: ApiSnapshot): DashboardState {
     ),
   ];
 
-  return { book, compliance, strategies };
+  const holdings = snapshot.holdings
+    ? snapshot.holdings.map(mapApiHoldingRow)
+    : scaleHoldings(MOCK_HOLDINGS, snapshot.total_equity);
+
+  const performanceHero = snapshot.performance_hero
+    ? mapApiPerformanceHero(snapshot.performance_hero)
+    : derivePerformanceHero(strategies);
+
+  return { book, compliance, strategies, holdings, performanceHero };
 }
 
 export async function fetchSnapshot(

@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDeployment } from "@/components/providers/DeploymentProvider";
 import { SNAPSHOT_API_URL, SNAPSHOT_POLL_MS } from "@/lib/config";
-import { fetchSnapshot, mapSnapshotToDashboard } from "@/lib/api/snapshot";
+import {
+  fetchSnapshot,
+  mapSnapshotToDashboard,
+  SnapshotFetchError,
+} from "@/lib/api/snapshot";
 import type { ApiConnectionStatus, DashboardState } from "@/lib/types";
 
 interface UseDashboardSnapshotResult {
@@ -13,12 +17,30 @@ interface UseDashboardSnapshotResult {
   error: string | null;
 }
 
+function logPollFailure(err: unknown): void {
+  if (process.env.NODE_ENV !== "development") return;
+
+  const message = err instanceof Error ? err.message : String(err);
+  const status =
+    err instanceof SnapshotFetchError ? err.status : undefined;
+  const corsHint =
+    message === "Failed to fetch" || message.includes("NetworkError")
+      ? " — check FastAPI is running on :8000 and CORS/proxy (/qctf-backend)"
+      : "";
+
+  console.warn(
+    `[QCTF MODEL] snapshot poll failed${status ? ` (${status})` : ""}: ${message}${corsHint}`
+  );
+}
+
 export function useDashboardSnapshot(
   initial: DashboardState
 ): UseDashboardSnapshotResult {
   const { isSandbox } = useDeployment();
   const [data, setData] = useState<DashboardState>(initial);
-  const [apiStatus, setApiStatus] = useState<ApiConnectionStatus>("DISCONNECTED");
+  const [apiStatus, setApiStatus] = useState<ApiConnectionStatus>(
+    isSandbox ? "LOCAL_SIMULATION" : "DISCONNECTED"
+  );
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
@@ -26,7 +48,8 @@ export function useDashboardSnapshot(
   useEffect(() => {
     if (isSandbox) {
       setData(initial);
-      setApiStatus("DISCONNECTED");
+      setApiStatus("LOCAL_SIMULATION");
+      setLastUpdatedAt(null);
       setError(null);
     }
   }, [isSandbox, initial]);
@@ -43,10 +66,17 @@ export function useDashboardSnapshot(
       setApiStatus("CONNECTED");
       setLastUpdatedAt(snapshot.generated_at);
       setError(null);
+
+      if (process.env.NODE_ENV === "development") {
+        console.debug(
+          `[QCTF MODEL] snapshot OK · ${snapshot.generated_at} · ${SNAPSHOT_API_URL}/api/snapshot`
+        );
+      }
     } catch (err) {
       if (signal.aborted) return;
       setApiStatus("DISCONNECTED");
       setError(err instanceof Error ? err.message : "Snapshot fetch failed");
+      logPollFailure(err);
     } finally {
       inFlightRef.current = false;
     }
@@ -56,6 +86,8 @@ export function useDashboardSnapshot(
     if (isSandbox) {
       return;
     }
+
+    setApiStatus("DISCONNECTED");
 
     const controller = new AbortController();
     void poll(controller.signal);

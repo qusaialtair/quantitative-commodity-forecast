@@ -33,7 +33,12 @@ export default function ModuleCard({
           </span>
         )}
       </div>
-      <div className="flex flex-1 items-center justify-center p-4">
+      <div
+        className={cn(
+          "flex flex-1 flex-col",
+          children ? "min-h-0" : "items-center justify-center p-4"
+        )}
+      >
         {children ?? (
           <span className="font-mono text-[10px] tracking-wide text-text-muted">
             MODULE PENDING

@@ -1,0 +1,59 @@
+# ─── Core Data Science ────────────────────────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.13.0
+scikit-learn>=1.5.0          # SGDRegressor, RandomForestRegressor, stacking
+
+# ─── Deep Learning (LSTM base learner) ───────────────────────────────────────
+torch>=2.3.0                  # GoldLSTM — MPS / CUDA / CPU
+torchvision>=0.18.0
+
+# ─── Gradient Boosting (base learners + XGBoost meta-learner) ────────────────
+lightgbm>=4.3.0
+xgboost>=2.0.0
+
+# ─── NLP / Sentiment Models ──────────────────────────────────────────────────
+transformers>=4.41.0          # FinBERT, DeBERTa via HuggingFace
+sentencepiece>=0.2.0
+tokenizers>=0.19.0
+
+# ─── WebSocket / Async Networking ────────────────────────────────────────────
+websockets>=12.0              # Async WebSocket client (CME price feed)
+websocket-client>=1.8.0       # Sync WebSocket fallback
+aiohttp>=3.9.0                # Async HTTP for polling loops
+httpx>=0.27.0                 # Sync/async HTTP (Perplexity API calls)
+requests>=2.32.0
+
+# ─── Data Validation & Serialisation ─────────────────────────────────────────
+pydantic>=2.7.0               # JSON schema enforcement on API responses
+jsonschema>=4.22.0
+
+# ─── Streamlit UI ────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+plotly>=5.22.0
+altair>=5.3.0
+
+# ─── Model Persistence ───────────────────────────────────────────────────────
+joblib>=1.4.0
+
+# ─── Configuration & Secrets ─────────────────────────────────────────────────
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+
+# ─── AI Agent SDKs ───────────────────────────────────────────────────────────
+google-genai>=0.8.0           # Analyst: gemini-2.0-flash-lite (free tier, multi-turn)
+anthropic>=0.40.0             # Reserved: upgrade path to claude-haiku-4-5 when credits added
+
+# ─── Caching ─────────────────────────────────────────────────────────────────
+diskcache>=5.6.3              # Semantic / prompt caching layer
+cachetools>=5.3.0
+
+# ─── Quantitative Finance Utilities ──────────────────────────────────────────
+yfinance>=0.2.40              # Historical market data (Gold GC=F)
+ta>=0.11.0                    # Technical indicators (RSI, MA, etc.)
+pandas-ta>=0.3.14b
+pyportfolioopt>=1.5.5         # Kelly Criterion / position sizing helpers
+
+# ─── Testing ─────────────────────────────────────────────────────────────────
+pytest>=8.2.0
+pytest-asyncio>=0.23.0

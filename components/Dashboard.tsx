@@ -26,6 +26,10 @@ export default function Dashboard({ initial }: DashboardProps) {
   const compliance =
     sandboxCompliance ?? (isSandbox ? initial.compliance : data.compliance);
   const strategies = buildStrategies(book.totalEquity, compliance);
+  const holdings = isSandbox ? initial.holdings : data.holdings;
+  const performanceHero = isSandbox
+    ? initial.performanceHero
+    : data.performanceHero;
 
   const handleShariaToggle = useCallback(
     (treasuryShariaCleared: boolean) => {
@@ -52,6 +56,8 @@ export default function Dashboard({ initial }: DashboardProps) {
       strategyAttribution={
         <StrategyAttribution strategies={strategies} totalEquity={book.totalEquity} />
       }
+      holdings={holdings}
+      performanceHero={performanceHero}
     />
   );
 }

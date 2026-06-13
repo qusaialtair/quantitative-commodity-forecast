@@ -2,7 +2,11 @@
 
 import { useState } from "react";
 import Header from "@/components/shell/Header";
-import type { ApiConnectionStatus } from "@/lib/types";
+import type {
+  ApiConnectionStatus,
+  HoldingRow,
+  SessionPerformanceHero,
+} from "@/lib/types";
 import NavTabs, { type NavSection } from "@/components/shell/NavTabs";
 import HomeSection from "@/components/dashboard/sections/HomeSection";
 import MetalsSection from "@/components/dashboard/sections/MetalsSection";
@@ -10,13 +14,17 @@ import EquitiesSection from "@/components/dashboard/sections/EquitiesSection";
 import AgentSection from "@/components/dashboard/sections/AgentSection";
 import PerformanceSection from "@/components/dashboard/sections/PerformanceSection";
 
-const SECTIONS: Record<NavSection, React.ComponentType> = {
-  home: HomeSection,
+const SECTIONS: Record<Exclude<NavSection, "home">, React.ComponentType> = {
   metals: MetalsSection,
   equities: EquitiesSection,
   agent: AgentSection,
   performance: PerformanceSection,
 };
+
+function SectionRouter({ section }: { section: Exclude<NavSection, "home"> }) {
+  const Section = SECTIONS[section];
+  return <Section />;
+}
 
 interface DashboardShellProps {
   apiStatus: ApiConnectionStatus;
@@ -24,6 +32,8 @@ interface DashboardShellProps {
   metricsBar: React.ReactNode;
   compliancePanel: React.ReactNode;
   strategyAttribution: React.ReactNode;
+  holdings: HoldingRow[];
+  performanceHero: SessionPerformanceHero;
 }
 
 export default function DashboardShell({
@@ -32,9 +42,10 @@ export default function DashboardShell({
   metricsBar,
   compliancePanel,
   strategyAttribution,
+  holdings,
+  performanceHero,
 }: DashboardShellProps) {
   const [active, setActive] = useState<NavSection>("home");
-  const ActiveSection = SECTIONS[active];
 
   return (
     <div className="flex min-h-screen flex-col bg-ebony">
@@ -49,9 +60,11 @@ export default function DashboardShell({
           <HomeSection
             compliancePanel={compliancePanel}
             strategyAttribution={strategyAttribution}
+            holdings={holdings}
+            performanceHero={performanceHero}
           />
         ) : (
-          <ActiveSection />
+          <SectionRouter section={active} />
         )}
       </main>
     </div>

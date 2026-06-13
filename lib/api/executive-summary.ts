@@ -2,8 +2,19 @@ import { SNAPSHOT_API_URL } from "@/lib/config";
 
 export interface ExecutiveSummaryPayload {
   summary: string;
+  /** Newsletter masthead line — "The QCTF Daily" headline. */
+  headline?: string;
+  /** THE READ — market narrative. (Legacy key: MARKET.) */
+  market?: string;
+  /** POSITIONING — holdings translated to plain English. (Legacy key: HOLDINGS.) */
+  holdings?: string;
+  watchlist?: string;
+  /** THE CALL — bottom-line recommendation. (Legacy key: ACTION.) */
+  action?: string;
   generated_at?: string;
   run_date?: string;
+  offline?: boolean;
+  reason?: string;
 }
 
 export class ExecutiveSummaryFetchError extends Error {
